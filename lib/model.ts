@@ -25,6 +25,17 @@
 // how widely the protocol is already distributed. The dashboard and the
 // dossier state this formula in full, and the page recomputes every row
 // from the same figures, so code and board visibly agree.
+//
+// Farm plans: every category has its own set of action templates, at
+// least four per category, written for what that kind of protocol
+// actually does. A row's plan picks four of its category's templates,
+// rotated by the protocol's slug so two protocols in one category do
+// not get the same four steps in the same order, then adds the shared
+// wallet, second-chain, hold, claim-check and log steps. Every step is
+// a suggested onchain action with a concrete cost and time, never a
+// guaranteed airdrop: the snapshot carries no airdrop flag, and no step
+// claims one, a token, a price, a yield or a date the snapshot does
+// not carry.
 
 export interface SnapshotProtocol {
   slug: string;
@@ -305,42 +316,365 @@ function holdDaysFor(age: number | null): number {
   return 30;
 }
 
-/** The category's one action, in words a farmer can follow. */
-function actionFor(p: SnapshotProtocol, capital: number, chain: string): string {
-  const c = (p.category ?? '').toLowerCase();
-  const name = p.name;
-  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `Supply $${capital} of USDC to ${name} on ${chain} and keep the position open.`;
-  if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm')) return `Provide $${capital} of liquidity to ${name}'s main pool on ${chain} and keep the position open.`;
-  if (c.includes('bridge')) return `Bridge $${capital} of USDC to ${chain} through ${name} and use the bridged funds in its app.`;
-  if (c.includes('staking') || c.includes('restak')) return `Stake $${capital} of the chain's staking asset through ${name} and keep the receipt.`;
-  if (c.includes('perpetual') || c.includes('derivative')) return `Deposit $${capital} of USDC as margin on ${name} and open one small hedge.`;
-  if (c.includes('prediction')) return `Fund $${capital} and place one market position on ${name}.`;
-  if (c.includes('curator') || c.includes('allocator') || c.includes('risk')) return `Deposit $${capital} into a ${name} vault on ${chain} and keep the shares.`;
-  if (c.includes('stable')) return `Mint or deposit $${capital} of the stable asset through ${name} on ${chain}.`;
-  if (c.includes('rwa')) return `Mint $${capital} of the protocol's yield asset on ${chain} and hold it.`;
-  if (c.includes('insurance')) return `Buy $${capital} of cover from ${name} on ${chain} and keep the policy.`;
-  if (c.includes('payment')) return `Send $${capital} through ${name} on ${chain} and keep the receipt.`;
-  return `Deposit $${capital} of USDC into ${name} on ${chain} and keep the position open.`;
+// ---------------------------------------------------------------------------
+// Farm plan templates, one set per category. Placeholders: {name} is the
+// protocol name, {chain} its first chain, {capital} the position size,
+// {half} half of it, {hold} the hold in days. Every set has at least
+// four templates, each a concrete onchain action for that kind of
+// protocol. No template promises an airdrop, a token, a price, a yield
+// or a date.
+// ---------------------------------------------------------------------------
+
+const FARM_TEMPLATES: Record<string, string[]> = {
+  'Risk Curators': [
+    'Deposit ${capital} into a {name} vault on {chain} and keep the vault shares.',
+    'Deposit ${half} into a second {name} vault on {chain} with a different risk profile.',
+    'Move ${half} between two {name} vaults on {chain} after comparing their published allocations.',
+    'Add ${half} to your {name} vault position on {chain} and leave it in the vault.',
+  ],
+  Dexs: [
+    'Provide ${capital} of liquidity to the main {name} pool on {chain} and keep the position open.',
+    'Swap ${half} of USDC for the other asset in the pool through {name} on {chain}.',
+    'Add ${half} of liquidity to a second {name} pool on {chain}.',
+    'Provide ${half} of single-sided liquidity to {name} on {chain} if the pool supports it.',
+  ],
+  'Onchain Capital Allocator': [
+    'Deposit ${capital} into a {name} allocation vault on {chain} and keep the shares.',
+    'Allocate ${half} to a second {name} strategy on {chain}.',
+    'Move ${half} between {name} strategies on {chain} after reading the latest strategy report.',
+    'Top up your {name} allocation on {chain} by ${half} and hold the position.',
+  ],
+  RWA: [
+    'Mint ${capital} of the yield-bearing asset through {name} on {chain} and hold it.',
+    'Buy ${half} of a tokenised asset through {name} on {chain} on the secondary market.',
+    'Mint ${half} more of the {name} yield asset on {chain} after checking its redemption terms.',
+    'Hold ${half} of the {name} asset in a second position on {chain} as a separate tranche.',
+  ],
+  Lending: [
+    'Supply ${capital} of USDC to {name} on {chain} and keep the supply position open.',
+    'Borrow ${half} of USDC against your supplied collateral on {name} and repay it within the same week.',
+    'Supply ${half} of a second asset to {name} on {chain} alongside your USDC.',
+    'Repay ${half} of an open {name} borrow on {chain} and check the position health factor.',
+  ],
+  Yield: [
+    'Deposit ${capital} into a {name} yield vault on {chain} and keep the shares.',
+    'Stake ${half} in a second {name} vault on {chain}.',
+    'Compound ${half} of accrued rewards back into your {name} position on {chain}.',
+    'Move ${half} between two {name} vaults on {chain} after comparing their published strategies.',
+  ],
+  Derivatives: [
+    'Deposit ${capital} of USDC as margin on {name} and open one small hedge.',
+    'Open a second small hedge on {name} with ${half} of margin.',
+    'Close ${half} of an open {name} position and keep the rest running.',
+    'Deposit ${half} more margin on {name} to widen the buffer on your open position.',
+  ],
+  CDP: [
+    'Lock ${capital} of collateral in {name} on {chain} and mint stablecoins against it.',
+    'Repay ${half} of your {name} debt on {chain} and check the collateral ratio.',
+    'Add ${half} of collateral to your {name} position on {chain}.',
+    'Mint ${half} of stablecoins from a second {name} collateral type on {chain}.',
+  ],
+  'Yield Aggregator': [
+    'Deposit ${capital} into a {name} aggregator vault on {chain} and keep the shares.',
+    'Switch ${half} of your {name} deposit to a different strategy in the same vault.',
+    'Deposit ${half} into a second {name} vault on {chain}.',
+    'Compound ${half} back into your {name} vault on {chain} instead of withdrawing it.',
+  ],
+  'Basis Trading': [
+    'Deposit ${capital} into a {name} basis vault on {chain} and keep the shares.',
+    'Add ${half} to your {name} basis position on {chain} after checking the funding rate.',
+    'Deposit ${half} into a second {name} basis strategy on {chain}.',
+    'Withdraw ${half} from your {name} position on {chain} as a test and redeposit it.',
+  ],
+  Chain: [
+    'Bridge ${capital} of USDC to {chain} through the chain own bridge and use it in a native app.',
+    'Stake ${half} of the chain native asset on {chain} through a validator.',
+    'Swap ${half} on a native {chain} dex and hold the received asset.',
+    'Vote on one {chain} governance proposal with ${half} of voting power if you hold it.',
+  ],
+  'Staking Pool': [
+    'Stake ${capital} of the chain staking asset in the {name} pool on {chain} and keep the receipt.',
+    'Delegate ${half} to a second validator through {name} on {chain}.',
+    'Restake ${half} of accrued staking rewards through {name} on {chain}.',
+    'Unstake ${half} as a test from {name} on {chain} and restake it.',
+  ],
+  'Liquidity Manager': [
+    'Deposit ${capital} into a {name} managed liquidity position on {chain}.',
+    'Rebalance ${half} of your {name} range on {chain} after a price move.',
+    'Add ${half} to a second {name} managed range on {chain}.',
+    'Withdraw ${half} from your {name} position on {chain} and redeposit it in a narrower range.',
+  ],
+  'Prediction Market': [
+    'Fund ${capital} and place one market position on {name}.',
+    'Place a second ${half} position on a different {name} market.',
+    'Trade out of ${half} of an open {name} position before it resolves.',
+    'Add ${half} to an open {name} market position you already hold.',
+  ],
+  Restaking: [
+    'Restake ${capital} of the staking receipt through {name} and keep the new receipt.',
+    'Delegate ${half} of your restaked position to a second operator through {name}.',
+    'Restake ${half} more of the staking asset through {name} on {chain}.',
+    'Unstake ${half} from {name} as a test and restake it with a different operator.',
+  ],
+  'Stablecoin Wrapper': [
+    'Wrap ${capital} of the stablecoin through {name} on {chain} and hold the wrapped asset.',
+    'Use ${half} of the wrapped asset in a {name} pool on {chain}.',
+    'Unwrap ${half} through {name} on {chain} as a test and wrap it again.',
+    'Wrap ${half} more of the stablecoin through {name} on {chain}.',
+  ],
+  CeDeFi: [
+    'Deposit ${capital} into {name} on {chain} and keep the position open.',
+    'Check the published proof of reserves for {name}, then deposit ${half} more on {chain}.',
+    'Withdraw ${half} from {name} on {chain} as a test and redeposit it.',
+    'Move ${half} between two {name} products on {chain}.',
+  ],
+  Farm: [
+    'Deposit ${capital} of LP tokens into the {name} farm on {chain}.',
+    'Harvest ${half} of accrued farm rewards on {name} and compound them back in.',
+    'Deposit ${half} of LP tokens into a second {name} farm pool on {chain}.',
+    'Stake ${half} of the farm receipt token in the {name} staking pool on {chain}.',
+  ],
+  'Anchor BTC': [
+    'Mint ${capital} of the BTC-anchored asset through {name} on {chain} and hold it.',
+    'Use ${half} of the anchored asset as collateral on {name} on {chain}.',
+    'Redeem ${half} of the anchored asset through {name} on {chain} as a test and mint it again.',
+    'Hold ${half} of the anchored asset in a {name} vault on {chain}.',
+  ],
+  'Leveraged Farming': [
+    'Open a small leveraged farm position on {name} with ${capital} of collateral on {chain}.',
+    'Add ${half} of collateral to your {name} leveraged position on {chain}.',
+    'Reduce ${half} of your {name} leveraged position on {chain} after a price move.',
+    'Close ${half} of the {name} position on {chain} and keep the rest running.',
+  ],
+  'Dual-Token Stablecoin': [
+    'Mint ${capital} of the stablecoin through {name} on {chain} against collateral.',
+    'Stake ${half} of the protocol second token through {name} on {chain}.',
+    'Mint ${half} more of the stablecoin through {name} on {chain} from a second collateral type.',
+    'Repay ${half} of your {name} stablecoin debt on {chain} and check the peg.',
+  ],
+  'Decentralized BTC': [
+    'Mint ${capital} of the BTC-backed asset through {name} on {chain} and hold it.',
+    'Deposit ${half} of the BTC-backed asset into a {name} vault on {chain}.',
+    'Use ${half} of the BTC-backed asset as collateral on {name} on {chain}.',
+    'Redeem ${half} of the BTC-backed asset through {name} on {chain} as a test.',
+  ],
+  'Collateral Markets': [
+    'Supply ${capital} of collateral to a {name} market on {chain}.',
+    'Borrow ${half} against your {name} collateral on {chain} and repay it within the week.',
+    'Supply ${half} of a second collateral type to {name} on {chain}.',
+    'Repay ${half} of an open {name} borrow on {chain} and check the market health factor.',
+  ],
+  'CDP Manager': [
+    'Open a {name} vault with ${capital} of collateral on {chain} and mint stablecoins.',
+    'Adjust your {name} vault by adding ${half} of collateral on {chain}.',
+    'Repay ${half} of your {name} vault debt on {chain}.',
+    'Open a second {name} vault with ${half} of a different collateral type on {chain}.',
+  ],
+  Payments: [
+    'Send ${capital} through {name} on {chain} and keep the receipt.',
+    'Receive ${half} through {name} on {chain} into your farming wallet.',
+    'Pay one invoice of ${half} through {name} on {chain}.',
+    'Send ${half} through {name} on {chain} to a second wallet you control as a test.',
+  ],
+  'OTC Marketplace': [
+    'Place a small OTC order of ${capital} through {name} on {chain}.',
+    'Settle a ${half} OTC trade through {name} on {chain} and keep the receipt.',
+    'List ${half} for an OTC sale through {name} on {chain}.',
+    'Buy ${half} through a {name} OTC order on {chain} and check settlement.',
+  ],
+  'Cross Chain Bridge': [
+    'Bridge ${capital} of USDC to {chain} through {name} and use the bridged funds in its app.',
+    'Bridge ${half} back through {name} as a test and bridge it out again.',
+    'Bridge ${half} of USDC to a second chain through {name}.',
+    'Use ${half} of bridged funds in a {name}-supported app on {chain}.',
+  ],
+  'Governance Incentives': [
+    'Vote on one {name} proposal with ${half} of voting power on {chain}.',
+    'Delegate ${half} of your voting power through {name} on {chain}.',
+    'Claim incentives from {name} on {chain} only through the link its own page publishes.',
+    'Vote on a second {name} proposal on {chain} after reading the discussion.',
+  ],
+  Insurance: [
+    'Buy ${capital} of cover from {name} on {chain} and keep the policy.',
+    'Buy ${half} of cover for a second protocol from {name} on {chain}.',
+    'Top up your {name} cover on {chain} by ${half}.',
+    'Check your {name} policy terms on {chain} and extend the cover by ${half} if it is expiring.',
+  ],
+  'Crypto Card Issuer': [
+    'Top up your {name} card with ${capital} on {chain}.',
+    'Spend ${half} with your {name} card and keep the receipt.',
+    'Top up your {name} card with ${half} from a second asset on {chain}.',
+    'Check your {name} card statement on {chain} and top it up by ${half}.',
+  ],
+  'Uncollateralized Lending': [
+    'Supply ${capital} to the {name} lending pool on {chain}.',
+    'Supply ${half} to a second {name} pool on {chain} with a different borrower set.',
+    'Withdraw ${half} from {name} on {chain} as a test and resupply it.',
+    'Check the published borrower report for the {name} pool on {chain}, then supply ${half} more.',
+  ],
+  Indexes: [
+    'Buy ${capital} of the {name} index token on {chain} and hold it.',
+    'Buy ${half} more of the {name} index token on {chain} after a rebalance.',
+    'Sell ${half} of your {name} index position on {chain} and keep the rest.',
+    'Hold ${half} of the {name} index token in a {name} vault on {chain}.',
+  ],
+  'Interest Rate Derivatives': [
+    'Deposit ${capital} as margin on {name} and open one small rate position.',
+    'Open a second small rate hedge on {name} with ${half} of margin.',
+    'Close ${half} of an open {name} rate position and keep the rest running.',
+    'Deposit ${half} more margin on {name} to widen the buffer on your position.',
+  ],
+  Bridge: [
+    'Bridge ${capital} of USDC to {chain} through {name} and use the bridged funds in its app.',
+    'Bridge ${half} back through {name} as a test and bridge it out again.',
+    'Bridge ${half} of USDC to a second chain through {name}.',
+    'Bridge ${half} of a second asset through {name} to {chain}.',
+  ],
+  'Canonical Bridge': [
+    'Bridge ${capital} of USDC to {chain} through the {name} canonical bridge.',
+    'Bridge ${half} back through {name} as a test.',
+    'Use ${half} of bridged funds in a native {chain} app after bridging through {name}.',
+    'Bridge ${half} of USDC to {chain} through {name} in a second transaction.',
+  ],
+  'AI Agents': [
+    'Deposit ${capital} into a {name} agent vault on {chain} and keep the shares.',
+    'Fund a {name} agent with ${half} on {chain} and check its published activity.',
+    'Deposit ${half} into a second {name} agent on {chain}.',
+    'Withdraw ${half} from a {name} agent on {chain} as a test and redeposit it.',
+  ],
+  'Algo-Stables': [
+    'Mint ${capital} of the stablecoin through {name} on {chain} against collateral.',
+    'Stake ${half} of the {name} stablecoin in its savings vault on {chain}.',
+    'Repay ${half} of your {name} stablecoin debt on {chain}.',
+    'Mint ${half} more of the stablecoin through {name} on {chain} from a second collateral type.',
+  ],
+  Launchpad: [
+    'Deposit ${capital} into a {name} launch pool on {chain} and keep the position open.',
+    'Commit ${half} to a second {name} launch on {chain}.',
+    'Stake ${half} through {name} on {chain} to qualify for the next launch.',
+    'Claim your allocation from {name} on {chain} only through the link its own page publishes.',
+  ],
+  Options: [
+    'Deposit ${capital} as margin on {name} and open one small option position.',
+    'Buy a ${half} protective option on {name} for a position you already hold.',
+    'Sell ${half} of covered options through {name} on {chain}.',
+    'Close ${half} of an open {name} option position before expiry.',
+  ],
+  Privacy: [
+    'Deposit ${capital} into a {name} private pool on {chain} and keep the position open.',
+    'Move ${half} through {name} on {chain} to a fresh wallet you control.',
+    'Deposit ${half} into a second {name} pool on {chain}.',
+    'Withdraw ${half} from {name} on {chain} to your own wallet as a test.',
+  ],
+  Synthetics: [
+    'Mint ${capital} of a synthetic asset through {name} on {chain} against collateral.',
+    'Trade ${half} of the synthetic asset on {name} on {chain}.',
+    'Mint ${half} more of the synthetic asset through {name} on {chain}.',
+    'Redeem ${half} of your {name} synthetic position on {chain} as a test.',
+  ],
+  'Stablecoin Issuer': [
+    'Mint ${capital} of the stablecoin through {name} on {chain} against collateral.',
+    'Deposit ${half} of the stablecoin into a {name} savings vault on {chain}.',
+    'Redeem ${half} of the stablecoin through {name} on {chain} as a test and mint it again.',
+    'Mint ${half} more of the stablecoin through {name} on {chain}.',
+  ],
+  'Token Locker': [
+    'Lock ${capital} of tokens through {name} on {chain} for the vesting period.',
+    'Lock ${half} more through {name} on {chain} in a second locker.',
+    'Check the unlock schedule of your {name} lock on {chain}.',
+    'Claim ${half} of unlocked tokens from {name} on {chain} only through its own page.',
+  ],
+  'Decentralized AI': [
+    'Deposit ${capital} into a {name} compute pool on {chain} and keep the position open.',
+    'Stake ${half} through {name} on {chain} to run one inference job.',
+    'Deposit ${half} into a second {name} pool on {chain}.',
+    'Withdraw ${half} from {name} on {chain} as a test and redeposit it.',
+  ],
+  'Reserve Currency': [
+    'Buy ${capital} of the reserve asset through {name} on {chain} and hold it.',
+    'Stake ${half} of the reserve asset through {name} on {chain}.',
+    'Bond ${half} through {name} on {chain} and keep the receipt.',
+    'Sell ${half} of your {name} reserve position on {chain} and keep the rest.',
+  ],
+  'Collateral Management': [
+    'Supply ${capital} of collateral to {name} on {chain} and keep the position open.',
+    'Move ${half} of collateral between {name} vaults on {chain}.',
+    'Add ${half} of collateral to your {name} position on {chain}.',
+    'Withdraw ${half} of excess collateral from {name} on {chain} as a test.',
+  ],
+  DOR: [
+    'Deposit ${capital} into a {name} vault on {chain} and keep the shares.',
+    'Deposit ${half} into a second {name} vault on {chain}.',
+    'Move ${half} between {name} vaults on {chain} after reading the latest report.',
+    'Top up your {name} position on {chain} by ${half}.',
+  ],
+  'NFT Marketplace': [
+    'List one NFT for sale on {name} on {chain} at a price you choose.',
+    'Buy one NFT for ${half} through {name} on {chain} and hold it.',
+    'Make a ${half} offer on an NFT through {name} on {chain}.',
+    'Sell ${half} of an NFT position through {name} on {chain} and keep the receipt.',
+  ],
+  'Options Vault': [
+    'Deposit ${capital} into a {name} options vault on {chain} and keep the shares.',
+    'Deposit ${half} into a second {name} vault on {chain}.',
+    'Withdraw ${half} from your {name} vault on {chain} as a test and redeposit it.',
+    'Top up your {name} vault position on {chain} by ${half}.',
+  ],
+};
+
+/** Fallback set for a category with no table of its own: still four distinct actions. */
+const GENERIC_TEMPLATES: string[] = [
+  'Deposit ${capital} of USDC into {name} on {chain} and keep the position open.',
+  'Swap ${half} of USDC for another asset through {name} on {chain}.',
+  'Deposit ${half} into a second {name} product on {chain}.',
+  'Hold ${half} of your {name} position on {chain} in a separate wallet as a second tranche.',
+];
+
+/** The template set for a protocol's category, or the generic set. */
+function templatesFor(p: SnapshotProtocol): string[] {
+  return FARM_TEMPLATES[p.category ?? ''] ?? GENERIC_TEMPLATES;
+}
+
+/** A small deterministic hash of a slug, so the template rotation is stable per protocol. */
+function slugHash(slug: string): number {
+  let h = 0;
+  for (let i = 0; i < slug.length; i++) h = (h * 31 + slug.charCodeAt(i)) >>> 0;
+  return h;
+}
+
+/** Fill one template's placeholders with the protocol's own figures. */
+function fillTemplate(template: string, p: SnapshotProtocol, capital: number, chain: string, hold: number): string {
+  return template
+    .replace(/{name}/g, p.name)
+    .replace(/{chain}/g, chain)
+    .replace(/{capital}/g, String(capital))
+    .replace(/{half}/g, String(Math.round(capital / 2)))
+    .replace(/{hold}/g, String(hold));
 }
 
 /**
- * A protocol's farm plan: six steps, each an action with a cost and a
- * time. Derived only from the protocol's own record (category, chains,
- * TVL, age), never from a hand-written list of names. Every step is a
- * suggested onchain action, never a guaranteed airdrop: the snapshot
- * carries no airdrop flag, and no step claims one.
+ * A protocol's farm plan: nine steps. One shared wallet step, four
+ * category-specific actions rotated by slug, a second-chain or weekly
+ * step, a hold, a claim check and a farm log. Derived only from the
+ * protocol's own record (category, chains, TVL, age), never from a
+ * hand-written list of names. Every step is a suggested onchain
+ * action, never a guaranteed airdrop: the snapshot carries no
+ * airdrop flag, and no step claims one.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const chain = chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
-  const action = actionFor(p, capital, chain);
+  const half = Math.round(capital / 2);
+  const templates = templatesFor(p);
+  const start = slugHash(p.slug) % templates.length;
+  const picked = [0, 1, 2, 3].map((i) => templates[(start + i) % templates.length]!);
   const secondChain = p.chains.length > 1 ? p.chains[1]! : null;
   const third: FarmStep =
     secondChain !== null
       ? {
           text: `Repeat the main action on a second chain, ${secondChain}, with half the capital, so the activity is not on one chain only.`,
-          cost: `$${Math.round(capital / 2)} of capital and about $4 of gas`,
+          cost: `$${half} of capital and about $4 of gas`,
           time: '15 minutes',
         }
       : {
@@ -354,7 +688,16 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       cost: 'under $3 of gas for the first transaction',
       time: '5 minutes',
     },
-    { text: action, cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`, time: '15 minutes to set up' },
+    ...picked.map((t, i) => {
+      // The cost must name the same amount the action moves: templates
+      // that act with {capital} cost the full position, {half} ones half.
+      const amt = t.includes('${capital}') ? capital : half;
+      return {
+        text: fillTemplate(t, p, capital, chain, hold),
+        cost: `$${amt} of capital and about $${i === 0 ? 8 : 4} of gas`,
+        time: i % 2 === 0 ? '15 minutes to set up' : '10 minutes',
+      };
+    }),
     third,
     {
       text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
